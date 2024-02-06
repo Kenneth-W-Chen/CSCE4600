@@ -3,13 +3,12 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"github.com/kenneth-w-chen/CSCE4600/Project2/builtins"
 	"io"
 	"os"
 	"os/exec"
 	"os/user"
 	"strings"
-
-	"github.com/jh125486/CSCE4600/Project2/builtins"
 )
 
 func main() {
