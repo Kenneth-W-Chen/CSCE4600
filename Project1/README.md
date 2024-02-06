@@ -30,7 +30,7 @@ The scheduler is written in Go (a skeleton `main.go` is included in the project 
       1. Hint: You can create a priority queue using a heap in Go: https://golang.org/pkg/container/heap/. 
    2. Implement SJF priority scheduling (preemptive) and report average turnaround time, average waiting time, and average throughput.
    3. Round-round (preemptive) and report average turnaround time, average waiting time, and average throughput.
-   4. Use a time quantum of 1.
+   4. Use a time quantum of 4.
 
 ## Grading
 
