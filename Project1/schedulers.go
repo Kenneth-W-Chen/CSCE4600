@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/heap"
 	"fmt"
 	"io"
 )
@@ -18,6 +19,59 @@ type (
 		Stop  int64
 	}
 )
+
+type Element struct {
+	process      Process
+	index        int
+	waitTime     int64
+	timeWorked   int64
+	currentSlice int64
+}
+
+// shamelessly copied from the Go docs example
+type SJFQueue []*Element
+
+func (pq SJFQueue) Len() int { return len(pq) }
+
+func (pq SJFQueue) Less(i, j int) bool {
+	// We want Pop to give us the highest, not lowest, priority so we use greater than here.
+	return (pq[i].process.BurstDuration - pq[i].timeWorked) < (pq[j].process.BurstDuration - pq[j].timeWorked)
+}
+
+func (pq SJFQueue) Swap(i, j int) {
+	pq[i], pq[j] = pq[j], pq[i]
+	pq[i].index = i
+	pq[j].index = j
+}
+
+func (pq *SJFQueue) Push(x any) {
+	n := len(*pq)
+	item := x.(*Element)
+	item.index = n
+	*pq = append(*pq, item)
+}
+
+func (pq *SJFQueue) Pop() any {
+	old := *pq
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = nil  // avoid memory leak
+	item.index = -1 // for safety
+	*pq = old[0 : n-1]
+	return item
+}
+
+func (pq *SJFQueue) update(item *Element, burst int64) {
+	item.process.BurstDuration = burst
+	heap.Fix(pq, item.index)
+}
+
+func min(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 //region Schedulers
 
@@ -77,10 +131,383 @@ func FCFSSchedule(w io.Writer, title string, processes []Process) {
 	outputSchedule(w, schedule, aveWait, aveTurnaround, aveThroughput)
 }
 
-func SJFSchedule(w io.Writer, title string, processes []Process) {}
+// assumes processes[] is already sorted by arrival time
+func SJFSchedule(w io.Writer, title string, processes []Process) {
+	var turnaround, throughput, aveWaitTime float64
+	var totalTime, start, scheduleIndex int64 = 0, 0, 0
+	var currentProcess *Element
+	var (
+		schedule = make([][]string, len(processes))
+		gantt    = make([]TimeSlice, 0)
+	)
+	pq := make(SJFQueue, 0)
+	heap.Init(&pq)
+	for i := range processes {
+		elapsedTime := processes[i].ArrivalTime - totalTime
+		if currentProcess == nil {
+			if len(pq) == 0 {
+				totalTime = processes[i].ArrivalTime
+				heap.Push(&pq, &Element{process: processes[i]})
+				continue
+			}
+			currentProcess = heap.Pop(&pq).(*Element)
+			currentProcess.waitTime = totalTime - currentProcess.process.ArrivalTime - currentProcess.timeWorked
+			start = totalTime
+		}
+		// remaining burst time for CPU until the arrival of a new process
+		remainingBurst := elapsedTime
+		// if there's enough time to finish the process
+		if (remainingBurst + currentProcess.timeWorked) >= currentProcess.process.BurstDuration {
+			//decrease remainingBurst by time used to complete the process
+			remainingBurst -= currentProcess.process.BurstDuration - currentProcess.timeWorked
+			//update stats
+			turnaround += float64(TurnaroundTime(*currentProcess))
+			aveWaitTime += float64(currentProcess.waitTime)
+			//remove process
+			schedule[scheduleIndex] = []string{
+				fmt.Sprint(currentProcess.process.ProcessID),
+				fmt.Sprint(currentProcess.process.Priority),
+				fmt.Sprint(currentProcess.process.BurstDuration),
+				fmt.Sprint(currentProcess.process.ArrivalTime),
+				fmt.Sprint(currentProcess.waitTime),
+				fmt.Sprint(TurnaroundTime(*currentProcess)),
+				fmt.Sprint(totalTime + elapsedTime - remainingBurst),
+			}
+			scheduleIndex++
+			gantt = append(gantt, TimeSlice{
+				PID:   currentProcess.process.ProcessID,
+				Start: start,
+				Stop:  totalTime + elapsedTime - remainingBurst,
+			})
+			start = totalTime + elapsedTime - remainingBurst
+			currentProcess = nil
+		} else /*not enough time to finish process, so just update allocate burst time to time worked*/ {
+			currentProcess.timeWorked += remainingBurst
+			remainingBurst = 0
+		}
+		for remainingBurst > 0 && len(pq) > 0 {
+			currentProcess = heap.Pop(&pq).(*Element)
+			/** wait time is the amount of time not worked while in the queue
+			Time in queue = current time - ArrivalTime
+			Current time is totalTime + elapsed time - the remaining burst time
+				because remaining burst time hasn't elapsed yet when we move this process from waiting
+			We remove time worked for obvious reasons**/
+			currentProcess.waitTime = totalTime + elapsedTime - remainingBurst - currentProcess.timeWorked - currentProcess.process.ArrivalTime
+			if (remainingBurst + currentProcess.timeWorked) >= currentProcess.process.BurstDuration {
+				//decrease remainingBurst by time used to complete the process
+				remainingBurst -= currentProcess.process.BurstDuration - currentProcess.timeWorked
+				//update stats
+				turnaround += float64(TurnaroundTime(*currentProcess))
+				aveWaitTime += float64(currentProcess.waitTime)
+				//remove process
+				schedule[scheduleIndex] = []string{
+					fmt.Sprint(currentProcess.process.ProcessID),
+					fmt.Sprint(currentProcess.process.Priority),
+					fmt.Sprint(currentProcess.process.BurstDuration),
+					fmt.Sprint(currentProcess.process.ArrivalTime),
+					fmt.Sprint(currentProcess.waitTime),
+					fmt.Sprint(TurnaroundTime(*currentProcess)),
+					fmt.Sprint(totalTime + elapsedTime - remainingBurst),
+				}
+				gantt = append(gantt, TimeSlice{
+					PID:   currentProcess.process.ProcessID,
+					Start: start,
+					Stop:  totalTime + elapsedTime - remainingBurst,
+				})
+				start = totalTime + elapsedTime - remainingBurst
+				currentProcess = nil
+			} else /*not enough time to finish process, so just update allocate burst time to time worked*/ {
+				currentProcess.timeWorked += remainingBurst
+				remainingBurst = 0
+			}
+		}
+		totalTime = processes[i].ArrivalTime
+		if currentProcess == nil || processes[i].BurstDuration >= currentProcess.process.BurstDuration-currentProcess.timeWorked {
+			heap.Push(&pq, &Element{process: processes[i]})
+		} else {
+			heap.Push(&pq, currentProcess)
+			gantt = append(gantt, TimeSlice{
+				PID:   currentProcess.process.ProcessID,
+				Start: start,
+				Stop:  totalTime,
+			})
+			currentProcess = &Element{process: processes[i]}
+			start = totalTime
+		}
+		//heap.Push(&pq, Element{process: processes[i]})
 
-func SJFPrioritySchedule(w io.Writer, title string, processes []Process) {}
+	}
+	for len(pq) > 0 {
+		if currentProcess == nil {
+			currentProcess = heap.Pop(&pq).(*Element)
+		}
+		currentProcess.waitTime = totalTime - currentProcess.process.ArrivalTime - currentProcess.timeWorked
+		turnaround += float64(TurnaroundTime(*currentProcess))
+		aveWaitTime += float64(currentProcess.waitTime)
+		totalTime += currentProcess.process.BurstDuration - currentProcess.timeWorked
 
-func RRSchedule(w io.Writer, title string, processes []Process) {}
+		schedule[scheduleIndex] = []string{
+			fmt.Sprint(currentProcess.process.ProcessID),
+			fmt.Sprint(currentProcess.process.Priority),
+			fmt.Sprint(currentProcess.process.BurstDuration),
+			fmt.Sprint(currentProcess.process.ArrivalTime),
+			fmt.Sprint(currentProcess.waitTime),
+			fmt.Sprint(TurnaroundTime(*currentProcess)),
+			fmt.Sprint(totalTime),
+		}
+		gantt = append(gantt, TimeSlice{
+			PID:   currentProcess.process.ProcessID,
+			Start: start,
+			Stop:  totalTime,
+		})
+		scheduleIndex++
+		start = totalTime
+		currentProcess = nil
+	}
+	turnaround /= float64(len(processes))
+	aveWaitTime /= float64(len(processes))
+	throughput = float64(len(processes)) / float64(totalTime)
+
+	outputTitle(w, title)
+	outputGantt(w, gantt)
+	outputSchedule(w, schedule, aveWaitTime, turnaround, throughput)
+}
+
+func SJFPrioritySchedule(w io.Writer, title string, processes []Process) {
+	var turnaround, throughput, aveWaitTime float64
+	var totalTime, start int64 = 0, 0
+	var currentProcess *Element
+	var (
+		schedule = make([][]string, len(processes))
+		gantt    = make([]TimeSlice, 0)
+		pq       = make([]SJFQueue, 50) // index is based on the process's priority - 1 (because arrays start at 0 but priorities start at 1)
+	)
+	for i := range pq {
+		pq[i] = make(SJFQueue, 0)
+		heap.Init(&(pq[i]))
+	}
+
+	for i := range processes {
+		// elapsedTime refers to the amount of time between "now" and the arrival of the next process
+		elapsedTime := processes[i].ArrivalTime - totalTime
+		for elapsedTime > 0 { // we want to keep removing the highest priority process until we have no more time
+			if currentProcess == nil { // since we aren't already acting on a process, we need to get a new one
+				currentProcess = PopFirst(&pq)
+				start = totalTime // also update the start time
+			}
+			if currentProcess == nil { // set time to latest time since no processes exist to execute until latest arrival
+				totalTime = processes[i].ArrivalTime
+				break // while setting elapsedTime to 0 gives the same result, it results in unnecessary operations and checks
+			}
+			// timeUsed refers to the amount of time used for this process between the current time and arrival time of the next process
+			timeUsed := min(elapsedTime, GetRemainingBurst(*currentProcess))
+			currentProcess.timeWorked += timeUsed
+			totalTime += timeUsed
+			elapsedTime -= timeUsed
+			if IsProcessComplete(*currentProcess) {
+				ProcessFinishedUpdate(&schedule, &gantt, &turnaround, &aveWaitTime, currentProcess, start, totalTime)
+				//start = totalTime // we want to update start time only when we remove a process to start work on it
+				currentProcess = PopFirst(&pq)
+				start = totalTime
+			}
+		}
+		if currentProcess == nil { // the only time it should be nil is if there were no processes in any of the queues
+			// so, we can set currentProcess to the process that just arrived
+			currentProcess = &(Element{process: processes[i]})
+			start = totalTime
+		} else if processes[i].Priority < currentProcess.process.Priority || // check if new process has higher priority
+			(processes[i].Priority == currentProcess.process.Priority && // check if same priority but
+				processes[i].BurstDuration < GetRemainingBurst(*currentProcess)) { // shorter job duration
+			// newest process preempts currentProcess
+			if start != totalTime {
+				UpdateGantt(&gantt, *currentProcess, start, totalTime)
+				start = totalTime
+			}
+			heap.Push(&(pq[currentProcess.process.Priority-1]), currentProcess)
+			currentProcess = &(Element{process: processes[i]})
+
+		} else { // process priority is lower than current process, or it's equal but job time isn't shorter
+			// push it into its appropriate queue
+			heap.Push(&(pq[processes[i].Priority-1]), &(Element{process: processes[i]}))
+		}
+	}
+	// assuming 314-322 work as intended, no other process should preempt currentProcess
+	// so check if it's there and work it until it's done
+	if currentProcess != nil {
+		totalTime += GetRemainingBurst(*currentProcess)
+		currentProcess.timeWorked = currentProcess.process.BurstDuration
+		ProcessFinishedUpdate(&schedule, &gantt, &turnaround, &aveWaitTime, currentProcess, start, totalTime)
+		// don't need to set to nil since first operation should be getting the first element
+	}
+	// we use a new for loop instead of repeatedly calling PopFirst() so that we don't have to recheck every single previous queue
+	for i := range pq {
+		for len(pq[i]) > 0 {
+			currentProcess = heap.Pop(&(pq[i])).(*Element)
+			start = totalTime
+			totalTime += GetRemainingBurst(*currentProcess)
+			currentProcess.timeWorked = currentProcess.process.BurstDuration
+			ProcessFinishedUpdate(&schedule, &gantt, &turnaround, &aveWaitTime, currentProcess, start, totalTime)
+		}
+	}
+
+	turnaround /= float64(len(processes))
+	aveWaitTime /= float64(len(processes))
+	throughput = float64(len(processes)) / float64(totalTime)
+
+	outputTitle(w, title)
+	outputGantt(w, gantt)
+	outputSchedule(w, schedule, aveWaitTime, turnaround, throughput)
+
+}
+
+func RRSchedule(w io.Writer, title string, processes []Process) {
+	//implement a queue via a linked list
+
+	var (
+		timeSliceSize  int64 = 4
+		queue                = make([]Element, 0)
+		totalTime      int64 = 0
+		start          int64 = 0
+		turnaround     float64
+		throughput     float64
+		aveWaitTime    float64
+		schedule       = make([][]string, len(processes))
+		gantt          = make([]TimeSlice, 0)
+		currentProcess Element
+	)
+
+	for i := range processes {
+		if len(queue) == 0 {
+			totalTime = processes[i].ArrivalTime
+			start = totalTime
+			Push(&queue, Element{process: processes[i]})
+			continue
+		}
+		if currentProcess == (Element{}) {
+			currentProcess = Pop(&queue)
+		}
+		elapsedTime := processes[i].ArrivalTime - totalTime
+		for elapsedTime > 0 {
+			// the time a process can use is limited by the time left, size of time slice, amount of remaining slice, and amount of time needed to finish the process
+			// therefore, we select the limiting factor
+			timeUsed := min(min(elapsedTime, timeSliceSize-currentProcess.currentSlice), GetRemainingBurst(currentProcess))
+			currentProcess.timeWorked += timeUsed
+			currentProcess.currentSlice += timeUsed
+			elapsedTime -= timeUsed
+			totalTime += timeUsed
+			if IsProcessComplete(currentProcess) {
+				ProcessFinishedUpdate(&schedule, &gantt, &turnaround, &aveWaitTime, &currentProcess, start, totalTime)
+				if len(queue) > 0 {
+					currentProcess = Pop(&queue)
+					start = totalTime
+				} else {
+					currentProcess = Element{}
+					totalTime = processes[i].ArrivalTime
+					start = totalTime
+					Push(&queue, Element{process: processes[i]})
+					break
+				}
+			} else if currentProcess.currentSlice == timeSliceSize { // current process can be put at end of queue
+				currentProcess.currentSlice = 0
+				UpdateGantt(&gantt, currentProcess, start, totalTime)
+				if totalTime == processes[i].ArrivalTime {
+					Push(&queue, Element{process: processes[i]})
+				}
+				Push(&queue, currentProcess)
+				currentProcess = Pop(&queue)
+				start = totalTime
+			} else if elapsedTime == 0 {
+				Push(&queue, Element{process: processes[i]})
+			}
+		}
+	}
+
+	for {
+		timeUsed := min(timeSliceSize-currentProcess.currentSlice, GetRemainingBurst(currentProcess))
+		currentProcess.timeWorked += timeUsed
+		totalTime += timeUsed
+		if IsProcessComplete(currentProcess) {
+			ProcessFinishedUpdate(&schedule, &gantt, &turnaround, &aveWaitTime, &currentProcess, start, totalTime)
+			if len(queue) > 0 {
+				currentProcess = Pop(&queue)
+				start = totalTime
+			} else {
+				break
+			}
+		} else /*if currentProcess.currentSlice == timeSliceSize */ { // this condition is implied by previous being false
+			UpdateGantt(&gantt, currentProcess, start, totalTime)
+			Push(&queue, currentProcess)
+			currentProcess = Pop(&queue)
+			start = totalTime
+		}
+	}
+
+	turnaround /= float64(len(processes))
+	aveWaitTime /= float64(len(processes))
+	throughput = float64(len(processes)) / float64(totalTime)
+
+	outputTitle(w, title)
+	outputGantt(w, gantt)
+	outputSchedule(w, schedule, aveWaitTime, turnaround, throughput)
+}
 
 //endregion
+
+// helper funcs
+func TurnaroundTime(element Element) int64 {
+	return element.waitTime + element.process.BurstDuration
+}
+
+func IsProcessComplete(element Element) bool {
+	return element.timeWorked == element.process.BurstDuration
+}
+
+// ProcessFinishedUpdate Updates the wait time for the process, and average stats like turnaround, average wait time. Also adds the process to the schedule and gantt chart
+func ProcessFinishedUpdate(schedule *[][]string, gantt *[]TimeSlice, turnaround *float64, aveWaitTime *float64, currentProcess *Element, start int64, end int64) {
+	(*currentProcess).waitTime = end - (*currentProcess).process.ArrivalTime - (*currentProcess).process.BurstDuration
+	*turnaround += float64(TurnaroundTime(*currentProcess))
+	*aveWaitTime += float64((*currentProcess).waitTime)
+	//remove process
+	*schedule = append(*schedule, []string{
+		fmt.Sprint((*currentProcess).process.ProcessID),
+		fmt.Sprint((*currentProcess).process.Priority),
+		fmt.Sprint((*currentProcess).process.BurstDuration),
+		fmt.Sprint((*currentProcess).process.ArrivalTime),
+		fmt.Sprint((*currentProcess).waitTime),
+		fmt.Sprint(TurnaroundTime(*currentProcess)),
+		fmt.Sprint(end),
+	})
+	UpdateGantt(gantt, *currentProcess, start, end)
+}
+
+// UpdateGantt Update the Gantt chart with values
+func UpdateGantt(gantt *[]TimeSlice, currentProcess Element, start int64, end int64) {
+	*gantt = append(*gantt, TimeSlice{
+		PID:   currentProcess.process.ProcessID,
+		Start: start,
+		Stop:  end,
+	})
+}
+
+func GetRemainingBurst(e Element) int64 {
+	return e.process.BurstDuration - e.timeWorked
+}
+
+func PopFirst(pq *[]SJFQueue) *Element {
+	for i := range *pq {
+		if len((*pq)[i]) > 0 {
+			return heap.Pop(&((*pq)[i])).(*Element)
+		}
+	}
+	return nil
+}
+
+func Push(a *[]Element, e Element) {
+	*a = append(*a, e)
+}
+
+func Pop(a *[]Element) Element {
+	e := (*a)[0]
+	*a = (*a)[1:]
+	return e
+}
