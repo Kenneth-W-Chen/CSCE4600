@@ -89,6 +89,7 @@ func FCFSSchedule(w io.Writer, title string, processes []Process) {
 		schedule        = make([][]string, len(processes))
 		gantt           = make([]TimeSlice, 0)
 	)
+
 	for i := range processes {
 		if processes[i].ArrivalTime > 0 {
 			waitingTime = serviceTime - processes[i].ArrivalTime
@@ -133,137 +134,73 @@ func FCFSSchedule(w io.Writer, title string, processes []Process) {
 
 // assumes processes[] is already sorted by arrival time
 func SJFSchedule(w io.Writer, title string, processes []Process) {
-	var turnaround, throughput, aveWaitTime float64
-	var totalTime, start, scheduleIndex int64 = 0, 0, 0
-	var currentProcess *Element
 	var (
-		schedule = make([][]string, len(processes))
-		gantt    = make([]TimeSlice, 0)
+		turnaround     float64
+		throughput     float64
+		aveWaitTime    float64
+		totalTime      int64 = 0
+		start          int64 = 0
+		currentProcess *Element
+		schedule       = make([][]string, len(processes))
+		gantt          = make([]TimeSlice, 0)
 	)
+	// initialize priority queue
 	pq := make(SJFQueue, 0)
 	heap.Init(&pq)
+
+	// insert processes into queue and work on them at the same time
 	for i := range processes {
+		// time between next process arrival and the current time
 		elapsedTime := processes[i].ArrivalTime - totalTime
-		if currentProcess == nil {
-			if len(pq) == 0 {
-				totalTime = processes[i].ArrivalTime
-				heap.Push(&pq, &Element{process: processes[i]})
-				continue
-			}
-			currentProcess = heap.Pop(&pq).(*Element)
-			currentProcess.waitTime = totalTime - currentProcess.process.ArrivalTime - currentProcess.timeWorked
-			start = totalTime
-		}
-		// remaining burst time for CPU until the arrival of a new process
-		remainingBurst := elapsedTime
-		// if there's enough time to finish the process
-		if (remainingBurst + currentProcess.timeWorked) >= currentProcess.process.BurstDuration {
-			//decrease remainingBurst by time used to complete the process
-			remainingBurst -= currentProcess.process.BurstDuration - currentProcess.timeWorked
-			//update stats
-			turnaround += float64(TurnaroundTime(*currentProcess))
-			aveWaitTime += float64(currentProcess.waitTime)
-			//remove process
-			schedule[scheduleIndex] = []string{
-				fmt.Sprint(currentProcess.process.ProcessID),
-				fmt.Sprint(currentProcess.process.Priority),
-				fmt.Sprint(currentProcess.process.BurstDuration),
-				fmt.Sprint(currentProcess.process.ArrivalTime),
-				fmt.Sprint(currentProcess.waitTime),
-				fmt.Sprint(TurnaroundTime(*currentProcess)),
-				fmt.Sprint(totalTime + elapsedTime - remainingBurst),
-			}
-			scheduleIndex++
-			gantt = append(gantt, TimeSlice{
-				PID:   currentProcess.process.ProcessID,
-				Start: start,
-				Stop:  totalTime + elapsedTime - remainingBurst,
-			})
-			start = totalTime + elapsedTime - remainingBurst
-			currentProcess = nil
-		} else /*not enough time to finish process, so just update allocate burst time to time worked*/ {
-			currentProcess.timeWorked += remainingBurst
-			remainingBurst = 0
-		}
-		for remainingBurst > 0 && len(pq) > 0 {
-			currentProcess = heap.Pop(&pq).(*Element)
-			/** wait time is the amount of time not worked while in the queue
-			Time in queue = current time - ArrivalTime
-			Current time is totalTime + elapsed time - the remaining burst time
-				because remaining burst time hasn't elapsed yet when we move this process from waiting
-			We remove time worked for obvious reasons**/
-			currentProcess.waitTime = totalTime + elapsedTime - remainingBurst - currentProcess.timeWorked - currentProcess.process.ArrivalTime
-			if (remainingBurst + currentProcess.timeWorked) >= currentProcess.process.BurstDuration {
-				//decrease remainingBurst by time used to complete the process
-				remainingBurst -= currentProcess.process.BurstDuration - currentProcess.timeWorked
-				//update stats
-				turnaround += float64(TurnaroundTime(*currentProcess))
-				aveWaitTime += float64(currentProcess.waitTime)
-				//remove process
-				schedule[scheduleIndex] = []string{
-					fmt.Sprint(currentProcess.process.ProcessID),
-					fmt.Sprint(currentProcess.process.Priority),
-					fmt.Sprint(currentProcess.process.BurstDuration),
-					fmt.Sprint(currentProcess.process.ArrivalTime),
-					fmt.Sprint(currentProcess.waitTime),
-					fmt.Sprint(TurnaroundTime(*currentProcess)),
-					fmt.Sprint(totalTime + elapsedTime - remainingBurst),
+		// loop until current time is the same as the process's arrival time
+		for elapsedTime > 0 {
+			if currentProcess == nil { /** this is true when one of the following is true:
+						a. i = 0... have not added or worked any processes yet
+						b. all processes finished when adding the previous process
+						c. the current process finished but there's still time left before ArrivalTime
+				**/
+				if len(pq) == 0 { // no more processes to work on, so update time to arrival time and exit loop
+					totalTime = processes[i].ArrivalTime
+					break
 				}
-				gantt = append(gantt, TimeSlice{
-					PID:   currentProcess.process.ProcessID,
-					Start: start,
-					Stop:  totalTime + elapsedTime - remainingBurst,
-				})
-				start = totalTime + elapsedTime - remainingBurst
+				// dispatch process and update start time
+				currentProcess = heap.Pop(&pq).(*Element)
+				start = totalTime
+			}
+			// timeUsed is the time the current process can use... restricted by time between ArrivalTime and current time, and the amount of burst left on the process
+			timeUsed := min(elapsedTime, GetRemainingBurst(*currentProcess))
+			currentProcess.timeWorked += timeUsed
+			totalTime += timeUsed   // update current time with the amount of CPU time used
+			elapsedTime -= timeUsed // decrease remaining time until ArrivalTime
+			if IsProcessComplete(*currentProcess) {
+				ProcessFinishedUpdate(&schedule, &gantt, &turnaround, &aveWaitTime, currentProcess, start, totalTime)
 				currentProcess = nil
-			} else /*not enough time to finish process, so just update allocate burst time to time worked*/ {
-				currentProcess.timeWorked += remainingBurst
-				remainingBurst = 0
 			}
 		}
-		totalTime = processes[i].ArrivalTime
-		if currentProcess == nil || processes[i].BurstDuration >= currentProcess.process.BurstDuration-currentProcess.timeWorked {
+		// if we don't have a process to preempt, or the arrival doesn't preempt, push arrival to queue
+		if currentProcess == nil || processes[i].BurstDuration >= GetRemainingBurst(*currentProcess) {
 			heap.Push(&pq, &Element{process: processes[i]})
-		} else {
+		} else { // else process is preempted
+			UpdateGantt(&gantt, *currentProcess, start, totalTime)
 			heap.Push(&pq, currentProcess)
-			gantt = append(gantt, TimeSlice{
-				PID:   currentProcess.process.ProcessID,
-				Start: start,
-				Stop:  totalTime,
-			})
-			currentProcess = &Element{process: processes[i]}
+			currentProcess = &(Element{process: processes[i]})
 			start = totalTime
 		}
-		//heap.Push(&pq, Element{process: processes[i]})
-
 	}
+	// no more processes to add, so start working on them
+	// since there are no more processes, we don't care about preemption anymore
 	for len(pq) > 0 {
-		if currentProcess == nil {
+		if currentProcess == nil { // this can only be false at the start... code looks neater than copying 198-201 outside the for loop and in an if statement
 			currentProcess = heap.Pop(&pq).(*Element)
+			start = totalTime
 		}
-		currentProcess.waitTime = totalTime - currentProcess.process.ArrivalTime - currentProcess.timeWorked
-		turnaround += float64(TurnaroundTime(*currentProcess))
-		aveWaitTime += float64(currentProcess.waitTime)
-		totalTime += currentProcess.process.BurstDuration - currentProcess.timeWorked
-
-		schedule[scheduleIndex] = []string{
-			fmt.Sprint(currentProcess.process.ProcessID),
-			fmt.Sprint(currentProcess.process.Priority),
-			fmt.Sprint(currentProcess.process.BurstDuration),
-			fmt.Sprint(currentProcess.process.ArrivalTime),
-			fmt.Sprint(currentProcess.waitTime),
-			fmt.Sprint(TurnaroundTime(*currentProcess)),
-			fmt.Sprint(totalTime),
-		}
-		gantt = append(gantt, TimeSlice{
-			PID:   currentProcess.process.ProcessID,
-			Start: start,
-			Stop:  totalTime,
-		})
-		scheduleIndex++
-		start = totalTime
+		totalTime += GetRemainingBurst(*currentProcess)
+		currentProcess.timeWorked = currentProcess.process.BurstDuration
+		ProcessFinishedUpdate(&schedule, &gantt, &turnaround, &aveWaitTime, currentProcess, start, totalTime)
 		currentProcess = nil
 	}
+
+	// generic stat calcs and outputting
 	turnaround /= float64(len(processes))
 	aveWaitTime /= float64(len(processes))
 	throughput = float64(len(processes)) / float64(totalTime)
