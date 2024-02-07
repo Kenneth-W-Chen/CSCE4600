@@ -200,11 +200,15 @@ func SJFSchedule(w io.Writer, title string, processes []Process) {
 		currentProcess = nil
 	}
 
-	// generic stat calcs and outputting
-	turnaround /= float64(len(processes))
-	aveWaitTime /= float64(len(processes))
-	throughput = float64(len(processes)) / float64(totalTime)
-
+	if len(processes) == 0 {
+		turnaround = 0.
+		aveWaitTime = 0.
+		throughput = 0.
+	} else { // generic stat calcs and outputting
+		turnaround /= float64(len(processes))
+		aveWaitTime /= float64(len(processes))
+		throughput = float64(len(processes)) / float64(totalTime-processes[0].ArrivalTime)
+	}
 	outputTitle(w, title)
 	outputGantt(w, gantt)
 	outputSchedule(w, schedule, aveWaitTime, turnaround, throughput)
@@ -287,10 +291,15 @@ func SJFPrioritySchedule(w io.Writer, title string, processes []Process) {
 		}
 	}
 
-	turnaround /= float64(len(processes))
-	aveWaitTime /= float64(len(processes))
-	throughput = float64(len(processes)) / float64(totalTime)
-
+	if len(processes) == 0 {
+		turnaround = 0.
+		aveWaitTime = 0.
+		throughput = 0.
+	} else { // generic stat calcs and outputting
+		turnaround /= float64(len(processes))
+		aveWaitTime /= float64(len(processes))
+		throughput = float64(len(processes)) / float64(totalTime-processes[0].ArrivalTime)
+	}
 	outputTitle(w, title)
 	outputGantt(w, gantt)
 	outputSchedule(w, schedule, aveWaitTime, turnaround, throughput)
@@ -379,10 +388,15 @@ func RRSchedule(w io.Writer, title string, processes []Process) {
 		}
 	}
 
-	turnaround /= float64(len(processes))
-	aveWaitTime /= float64(len(processes))
-	throughput = float64(len(processes)) / float64(totalTime)
-
+	if len(processes) == 0 {
+		turnaround = 0.
+		aveWaitTime = 0.
+		throughput = 0.
+	} else { // generic stat calcs and outputting
+		turnaround /= float64(len(processes))
+		aveWaitTime /= float64(len(processes))
+		throughput = float64(len(processes)) / float64(totalTime-processes[0].ArrivalTime)
+	}
 	outputTitle(w, title)
 	outputGantt(w, gantt)
 	outputSchedule(w, schedule, aveWaitTime, turnaround, throughput)
