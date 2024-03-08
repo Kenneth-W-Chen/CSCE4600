@@ -356,10 +356,10 @@ func RRSchedule(w io.Writer, title string, processes []Process) {
 			} else if currentProcess.currentSlice == timeSliceSize { // current process can be put at end of queue
 				currentProcess.currentSlice = 0
 				UpdateGantt(&gantt, currentProcess, start, totalTime)
+				Push(&queue, currentProcess)
 				if totalTime == processes[i].ArrivalTime {
 					Push(&queue, Element{process: processes[i]})
 				}
-				Push(&queue, currentProcess)
 				currentProcess = Pop(&queue)
 				start = totalTime
 			} else if elapsedTime == 0 {
